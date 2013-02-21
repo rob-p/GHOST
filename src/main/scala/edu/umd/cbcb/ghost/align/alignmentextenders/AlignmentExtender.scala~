@@ -1,0 +1,256 @@
+package edu.umd.cbcb.ghost.align.alignmentextenders
+
+import net.robpatro.utils.console.ProgressBar
+import collection.{ Map => CMap, LinearSeq }
+import scala.collection.JavaConversions._
+import scala.collection.parallel.mutable.ParArray
+import scala.collection.parallel.ParIterable
+import collection.mutable.{ ConcurrentMap => CMMap, HashMap => MHashMap, HashSet => MHashSet }
+import scala.math._
+import scala.util.Random
+
+import java.util.concurrent.{ ConcurrentHashMap => PHMap }
+
+// we need access to the matchers and signatures
+import edu.umd.cbcb.ghost.io.SimpleVertex
+import edu.umd.cbcb.ghost.align.matchers._
+import edu.umd.cbcb.ghost.align.ScoreMap
+import edu.umd.cbcb.ghost.align.SignatureMap
+import org.ejml.simple.SimpleMatrix
+import org.jgrapht.alg.BellmanFordShortestPath
+import scala.collection.mutable.PriorityQueue
+import org.ejml.simple._
+import org.ejml.data._
+import org.ejml.ops.NormOps
+
+import collection.parallel.mutable.{ ParSet => MParSet }
+import collection.mutable.{ Map => MMap }
+import edu.umd.cbcb.ghost.graphtools.Utils
+import edu.umd.cbcb.ghost.align.matchers._
+
+class AlignmentExtender( val seed: (String, String, Double), val ls: SignatureMap, val rs: SignatureMap, val blastScores: Option[ScoreMap], val a: Double, val matchType: String, val k: Int, val ematches: scala.collection.Map[(String, String),Double], val mappedLeft: scala.collection.mutable.Set[String], val mappedRight: scala.collection.mutable.Set[String], val currentMap: scala.collection.mutable.Map[SimpleVertex, SimpleVertex], val pbar: ProgressBar, val matcherCreator: Option[MatcherCreator] ) extends MatchTypes { 
+
+  private def jaccardDistance( nu: Set[SimpleVertex], nv: Set[SimpleVertex] ) = { 
+    val uiv = (nu & nv).size.toFloat
+    val uuv = (nu | nv).size.toFloat
+    if (uuv > 0) { 
+      1.0 - ( uiv / uuv )
+    } else { 
+      1.0
+    }
+  }
+
+  private def fsweight( nu: Set[SimpleVertex], nv: Set[SimpleVertex], navg: Double ) = { 
+    val uiv = (nu & nv).size
+    val uuv = (nu | nv).size
+    val umv = (nu &~ nv).size
+    val vmu = (nv &~ nu).size
+    val lambda = max( 0.0, navg - (umv + uiv))
+
+    ( (2.0*uiv) / (umv + 2.0*uiv + lambda) ) * ( (2.0 * uiv) / (vmu + 2.0*uiv + lambda))
+  }
+
+  private def computePairwiseScores( adjLeft: Set[SimpleVertex], adjRight: Set[SimpleVertex] ) = { 
+
+  }
+
+  def extendAlignment: collection.Set[(String,String,Double)] = { 
+    // elements of the queue are ordered by score
+    val ord = Ordering[Double].on[MatchType]( m => 1.0 - m._3 )
+    val pq = new PriorityQueue[MatchType]()(ord)
+    // val pq = MParSet.empty[ MatchType ]
+    pq += seed
+    var couldMap = true
+    val nhop = 4
+    val nbins = ls.binWidths.slice(0,nhop).sum
+    
+    /* Weight Vector */
+    
+    val avgDeg = 0.5 * (ls.avgDeg + rs.avgDeg)
+    var invFeatWeight = 0.0
+    val wvecDat = ls.binWidths.slice(0,nhop).zipWithIndex.flatMap{ 
+      wi =>
+	val (width, index) = wi
+      val fw = pow( avgDeg, -index)
+      invFeatWeight += fw
+      Array.fill(width){ fw }
+    }.toArray
+    invFeatWeight = (0.5 / invFeatWeight)
+    val wvec = new SimpleMatrix( Array(wvecDat) )
+   
+
+    // var cmatches = ematches // + ((seed._1, seed._2))
+    // var mappedLeft = matchedLeft 
+    // var mappedRight = matchedRight
+    // cmatches.map{ x => x._1 } // (x._1, (x._2, x._3)) }
+    // cmatches.map{ x => x._2 } // (x._2, (x._1, x._3)) }
+
+
+    var cmatches = Set.empty[(String, String, Double)]
+    
+    val haveBlastScores = blastScores.isDefined 
+    val alpha = if(haveBlastScores) { a } else { 1.0 }
+    val seqDist = blastScores.getOrElse( ScoreMap(None, 0.0) )
+
+    val vertsG = ls.G.vertexSet
+    val vertsH = rs.G.vertexSet
+    
+    val avgG = ls.avgDeg
+    val avgH = rs.avgDeg
+
+    /*
+    val A = new SimpleMatrix( nbins, nbins )
+    
+    var offset = 0
+    val r = 4.0
+    ls.binWidths.slice(0, nhop).map{ w =>
+      for( i <- offset until (offset+w);
+	   j <- offset until (offset+w) ) { 
+
+	     val fw = pow( avgDeg, -w)
+	     val d = fw * min( abs(i-j), r )
+	     A.set(i, j, 1.0 - (abs(i-j) / w.toFloat))
+      }
+      offset += w
+    }
+    */
+
+    def quadraticChi( l: SimpleMatrix, r: SimpleMatrix, A: SimpleMatrix, m: Double ) = { 
+      val Z = l.plus(r).mult(A)
+      val N = Z.numRows
+      val M = Z.numCols
+
+      // Z ( Z == 0 ) = 1 && Z.^m && Z = 1.0 ./ Z
+      for( i <- 0 until N; j <- 0 until M ) { 
+	val v = if (Z.get(i,j) == 0.0) { 1.0 } else { Z.get(i,j) }
+	Z.set(i, j, 1.0 / pow(v,m) ) 
+      }
+
+      // (l-r) * (1.0 / Z)
+      val D = (l.minus(r)).elementMult(Z)
+
+      // dist = sqrt( max( D * A * D', 0.0 ) )
+      sqrt( max( D.mult(A).mult(D.transpose()).get(0,0), 0.0) )
+    }
+
+    def  klDiv( l: Array[Double], r: Array[Double]) = { 
+      (0 until l.size).foldLeft(0.0){ (total, i) => 
+	if (r(i) > 0 && l(i) > 0) { total + (l(i) * log( l(i) / r(i) )) } else { total }
+      }
+    }
+
+    while ( ! pq.isEmpty ) {
+      // pq.clear
+      // pq ++= pairs
+      // pq = pairs
+      
+      // Take the highest scoring pair from the priority queue
+      val (cl1, cr1, s1) = pq.dequeue
+      /*
+      val (cl1, cr1, s1) = pq.minBy{ x => -Utils.structuralScore(currentMap, ls.neighborhoodByName(x._1, 1), ls.G, rs.G ) }
+      val s = pq.size
+      pq -= ((cl1, cr1, s1))
+      assert ( pq.size < s, "Remove didn't work")
+      */
+
+      if ( ! ((mappedLeft contains cl1) || (mappedRight contains cr1)) ) { 
+	println("Mapping %s to %s and examining neighborhood".format(cl1, cr1))
+
+        cmatches += ((cl1, cr1, s1))
+	currentMap( ls.nameVertexMap(cl1) ) = rs.nameVertexMap(cr1)
+	mappedLeft += cl1 
+	mappedRight += cr1 
+      }
+
+	pbar.update(mappedLeft.size)
+	// Get the neighborhood of the paired proteins in their respective networks
+	val adjLeft = ls.neighborhoodByName(cl1, 1)
+	val adjRight = rs.neighborhoodByName(cr1, 1)
+
+      def retrievePairwiseScores( adjLeft: collection.Set[SimpleVertex], adjRight: collection.Set[SimpleVertex] ) = { 
+	  Random.setSeed(System.currentTimeMillis)
+	  val matches = adjLeft.par.flatMap{ lv =>
+	    val lname = lv.name
+
+	    val dists = adjRight.map{ rv =>
+	      val rname = rv.name
+	      ( lname, rname, ematches( (lname, rname) ) )
+	    }
+	    dists
+    	  }.seq
+	matches
+      }
+      
+      
+	// Compute the pairwise scores
+	def computePairwiseScores( adjLeft: collection.Set[SimpleVertex], adjRight: collection.Set[SimpleVertex] ) = { 
+	  
+	  Random.setSeed(System.currentTimeMillis)
+	  
+	  val matches = adjLeft.par.flatMap{ 
+	    lv =>
+	      val lname = lv.name
+	    val lsig = ls.dmat.extractVector(true, ls.nameToId(lname)).extractMatrix(0,1,0,nbins)
+	    val ln = ls.neighborhoodByName(lname, 1).toSet
+	    val ldeg = ls.G.degreeOf( ls.nameVertexMap(lname) )
+
+	    val dists = adjRight.map{ 
+
+	      rv =>
+		val rname = rv.name
+	      val rn = rs.neighborhoodByName(rname,1).toSet
+
+	      val rdeg = rs.G.degreeOf( rs.nameVertexMap(rname) )
+	      val rsig = rs.dmat.extractVector(true, rs.nameToId(rname)).extractMatrix(0,1,0,nbins)
+	      // var dist = alpha * invFeatWeight * quadraticChi(lsig, rsig, A, 0.9)
+	      var dist = alpha * (invFeatWeight * NormOps.normP1( lsig.minus(rsig).elementMult(wvec).getMatrix )) 
+	      dist += (1.0 - alpha) * seqDist( (lname, rname) )
+	      // dist *= 1.0 - ( 0.5 * (ldeg + rdeg)  / ( ls.maxDeg + rs.maxDeg ).toFloat )
+	      (rname, dist)
+	    }.toArray
+
+	    val ndists = dists.sortBy{ x => x._2 }.slice(0,k).map{ m => (lname, m._1, m._2) }
+	    ndists.par
+	  }.seq
+
+	  Random.shuffle(matches)
+	  matches 
+	}
+	
+	val pmatches = computePairwiseScores( adjLeft, adjRight )
+
+	// don't consider things already mapped
+	val newmatches = pmatches.seq.filterNot{ 
+	  m => 
+	    (mappedLeft contains m._1)  || (mappedRight contains m._2)
+	}
+
+	var assignedMatches : Iterable[(String, String, Double)] = Iterable.empty
+
+        if (matcherCreator.isDefined) { 
+	  assignedMatches = if ( newmatches.size > 1 ) { 
+	    val lm = matcherCreator.get.create(newmatches.groupBy{ m => m._1 }.map{ x => (x._1, x._2.toArray.par) }, ls, rs)
+	    val amatches = lm.performMatching
+	    amatches.seq
+	  } else { 
+	    newmatches
+	  }
+
+	  assignedMatches.foreach{ nm =>
+            cmatches += nm 
+	    currentMap( ls.nameVertexMap(nm._1) ) = rs.nameVertexMap(nm._2)
+	    mappedLeft += nm._1 
+	    mappedRight += nm._2 
+	  }
+	} else { 
+	  assignedMatches = newmatches
+	}
+	// Place the new potential seeds on the priority queue
+	pq ++= assignedMatches.map{ t => (t._1, t._2, t._3)}
+      // }
+    }
+    
+    cmatches.seq.toSet
+  }
+
+}

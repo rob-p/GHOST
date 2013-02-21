@@ -1,0 +1,145 @@
+package edu.umd.cbcb.ghost.alignmentstatistics
+
+import net.robpatro.utils.console.ProgressBar
+import scalax.io._
+import scalax.file.Path
+import scalax.collection.mutable.Graph // or scalax.collection.mutable.Graph
+import scalax.collection.GraphPredef._, scalax.collection.GraphEdge._
+import scalax.collection.GraphTraversal.VisitorReturn.{ Continue => GContinue }
+import scala.collection.immutable.{ Map => Map, Set => Set }
+import scala.collection.mutable.{ Map => MMap, Set => MSet }
+object ComputeGOProbs{
+
+  class GNode(val name: String, val attr: Map[String,String] = Map.empty[String, String] ){
+    override def hashCode() = { name.hashCode }
+    override def equals(that: Any) = that match{
+      case that:GNode =>  name == that.name
+      case _ => false
+    }
+  }
+
+  def readRGF( fname:String ) = {
+    val g = Graph.empty[ GNode, DiEdge ]
+    val s:Input = Resource.fromFile(fname)
+    val lineView = s.lines()
+    // The first line of the file contains the number of nodes and edges
+    val Array(numNodes, numEdges) = lineView.head.split("\t").map{ _.toInt }
+    // the next N lines contain node definitions
+    lineView.slice(1, numNodes+1).foreach{
+      l =>
+        val toks = l.split("\t")
+      val name = toks(0) // Name of the node
+      // It's attributes
+      val attr = toks.slice(1, toks.size).map{
+        kv =>
+          val kvtoks = kv.split("=")
+          (kvtoks(0), kvtoks(1))
+      }.toMap
+      // Add the new node to the graph
+      g += new GNode(name, attr)
+    }
+
+
+    // The next M lines contain the edges
+    lineView.slice(numNodes+1, numNodes+numEdges+1).foreach{
+      l =>
+        val toks = l.split("\t")
+      val (a,b) = (new GNode(toks(0)), new GNode(toks(1)))
+      g += a~>b
+    }
+    g
+  }
+
+  def readAnnotMap( fname: String ) = {
+    val s:Input = Resource.fromFile(fname)
+    val lineView = s.lines()
+    lineView.map{
+      l =>
+        val toks = l.split("\t")
+        (toks.head, toks.tail.toSet)
+    }.toMap
+  }
+
+  def invIdx( annotMap: Map[String, Set[String]] ) = {
+    val invertedIndex = scala.collection.mutable.Map.empty[String, Int]
+
+    annotMap.foreach{
+      kv =>
+
+        val (k,v) = kv
+        v.foreach{
+          e =>
+
+          val cv = invertedIndex.getOrElse(e,0)
+          invertedIndex(e) = cv+1
+        }
+    }
+    invertedIndex
+  }
+
+  def main( args:Array[String] ) {
+    val gname = args(0)
+    val aname = args(1)
+
+    println("reading GO file from %s".format(gname))
+    val g = readRGF(gname)
+    println("reading annots from %s".format(aname))
+    val annotMap = readAnnotMap(aname)
+    println("computing inverted index")
+    val annotCount = invIdx(annotMap)
+    var probs = Map("molecular_function" -> MMap.empty[String,Double],
+                    "cellular_component" -> MMap.empty[String,Double],
+                    "biological_process" -> MMap.empty[String,Double])
+    val pb = new ProgressBar(annotCount.size,"=")
+    var ct = 0
+    annotCount.foreach{
+      gtc =>
+          val (gt,c) = gtc
+          val no = g.find( new GNode(gt) )
+          if (no.isEmpty){
+            println("Don't know annotation "+gt)
+          } else {
+            val n = no.get
+            val sucset = MSet( gt )
+            def addToSet(node: g.NodeT) = {
+              sucset += node.value.name
+              GContinue
+            }
+            n.traverseNodes(){ addToSet(_) }
+            //println("successors of "+n+" = "+sucset.mkString(" "))
+            var ssum = 0.0
+            sucset.foreach{ s => ssum += annotCount.getOrElse(s,0) }
+            probs(n.value.attr("Aspect"))(gt) = ssum
+          }
+      ct += 1
+      pb.update(ct)
+    }
+
+    pb.done()
+
+    val shortNames = Map("molecular_function" -> "MF",
+                         "cellular_component" -> "CC",
+                         "biological_process" -> "BP")
+
+    Path(args(2)).createFile(failIfExists=false)
+    val output:Seekable = Resource.fromFile(args(2))
+    output.append("\"%s\"\t\"%s\"\t\"%s\"\n".format("goid","prob", "ontology"))
+    output.append("\"%s\"\t\"%s\"\t\"%s\"\n".format("all","0", "universal"))
+
+    println("writing normalized probs")
+    probs.foreach{
+      aspect_map =>
+      val (aspect, vmap) = aspect_map
+      val saspect = shortNames(aspect)
+      val invMaxFreq = 1.0 / vmap.maxBy{ kv => kv._2 }._2
+
+      vmap.foreach{
+        kv =>
+          output.append("\"%s\"\t%f\t\"%s\"\n".format(kv._1, kv._2*invMaxFreq, saspect))
+      }
+    }
+
+  }
+
+
+}

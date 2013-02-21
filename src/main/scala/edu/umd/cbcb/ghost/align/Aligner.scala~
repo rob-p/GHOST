@@ -1,0 +1,134 @@
+package edu.umd.cbcb.ghost.align
+
+import scopt._
+import scala.io._
+import scala.math._
+import scala.collection.mutable.{ HashSet => MHashSet, ListBuffer }
+import scala.util.Random
+import scala.collection.JavaConversions._
+import scala.tools.nsc.io._
+
+import java.{ io => jio }
+import java.io.{ FileWriter => JFileWriter }
+
+import org.jgrapht.graph._
+import org.jgrapht.alg.{ ConnectivityInspector }
+import org.ejml.simple.SimpleMatrix
+import org.ejml.ops.NormOps
+
+import scalala.tensor.dense._
+import scalala.tensor.::
+
+
+import net.robpatro.utils.time.Timer
+import net.robpatro.utils.console.ProgressBar
+import edu.umd.cbcb.ghost.io.{ GEXFReader, EdgeListReader, SimpleVertex }
+import edu.umd.cbcb.ghost.graphtools.{ Utils, SequenceWeightedEdge }
+import edu.umd.cbcb.ghost.graphtools.actors._
+import edu.umd.cbcb.ghost.align.matchers._
+
+object Aligner{
+
+  /**
+   * Configuration Options
+   */
+  class Config { 
+    var numActors = 0
+    var g1FileName = ""
+    var g2FileName = ""
+    var g1SigFile = ""
+    var g2SigFile = ""
+    var outputDir = ""
+  }
+
+  def computeNearestNeighbors( lSigMap: SignatureMap, rSigMap: SignatureMap, unmatchedLeft: Iterable[Int], unmatchedRight: Iterable[Int], k: Int = 5 ) = { 
+
+    val pb = new ProgressBar( unmatchedLeft.size, "=" )
+    var i = 0
+    var (ma, mi) = (-Double.MaxValue, Double.MaxValue)
+    val matches = unmatchedLeft.flatMap{ lind: Int =>
+		    val lsig = lSigMap.dmat.extractVector(true, lind)
+		    val dists = unmatchedRight.map{ rind: Int =>
+		             val rsig = rSigMap.dmat.extractVector(true, rind)
+		             val dist = NormOps.normP1(lsig.minus(rsig).getMatrix)
+			     (rind, dist)
+		             }.toArray
+		   pb.update(i); i += 1
+		   val ndists = dists.sortBy{ indDist => indDist._2 }.slice(0,k).map{ md => (lind, md._1, md._2) }
+		   ndists
+                 }.toArray
+       
+    pb.done()
+    val ord = Ordering[Double].on[(Int,Int,Double)](_._3)
+    val smatch = matches.sorted(ord)
+    ma = smatch.last._3; mi = smatch.head._3
+    //matches.sortBy{ m => m._3 }.foreach{  m => println(lSigMap.idToName(m._1) + " <=> "+ rSigMap.idToName(m._2) + " : "+ m._3); ma=max(ma,m._3); mi=min(mi,m._3) }
+    val scaleFact = if (ma-mi > 0) { 1.0 / (ma-mi) } else { 1.0 }
+    println("Min Dist = "+mi+", Max Dist = "+ma)
+    println("First = "+smatch.head._3+", last = "+smatch.last._3)
+    matches.map{ m => (lSigMap.idToName(m._1), rSigMap.idToName(m._2), (m._3-mi)*scaleFact )}
+  }
+
+  def main(args: Array[String]) {
+    var config = new Config
+    val parser = new OptionParser("ComputeSubgraphSignatures") { 
+      intOpt("p", "numProcessors", "number of actors to use in parallel",
+	   { v: Int => config.numActors = v })
+      opt("u", "g1", "first input graph",
+	{ v: String => config.g1FileName = v})
+      opt("v", "g2", "second input graph",
+	{ v: String => config.g2FileName = v})
+      opt("s", "s1", "first input signature file",
+	{ v: String => config.g1SigFile = v})
+      opt("t", "s2", "second input signature file",
+	{ v: String => config.g2SigFile = v})
+      opt("o", "output", "output signature file",
+	{ v: String => config.outputDir = v})
+    }
+
+    if (parser.parse(args)) {
+      // Create a new GEXFReader and read in the graphs
+      val g1f = new GEXFReader(config.g1FileName, false).parse
+      val g2f = new GEXFReader(config.g2FileName, false).parse
+      
+      type SubgraphT = Subgraph[SimpleVertex, SequenceWeightedEdge, SimpleWeightedGraph[SimpleVertex, SequenceWeightedEdge]]
+      var g1 = Utils.largestConnectedComponent(g1f).getBase
+      var g2 = Utils.largestConnectedComponent(g2f).getBase
+      
+      val (sigMap1, sigMap2) = (new SignatureMap( config.g1SigFile, g1 ), new SignatureMap( config.g2SigFile, g2 ))
+      sigMap1.readSignatures( config.g1SigFile )
+      sigMap2.readSignatures( config.g2SigFile )
+
+      var unmatchedLeft = new MHashSet[Int]; var unmatchedRight = new MHashSet[Int]
+      Range(0, sigMap1.size).foreach{ x => unmatchedLeft += x}
+      Range(0, sigMap2.size).foreach{ x => unmatchedRight += x}
+
+      var k = 8//unmatchedLeft.size
+
+      val matches = new ListBuffer[Iterable[(String, String, Double)]]
+      while ( unmatchedLeft.size > 0 ) { 
+
+	k = min(k, unmatchedLeft.size)
+	val pmatches = computeNearestNeighbors(sigMap1, sigMap2, unmatchedLeft, unmatchedRight, k)
+	val amatch = pmatches.filter{ m => m._1 == m._2 }.size
+	println("Almost matched "+amatch)
+	
+	val matcher = new LAPMatcher(pmatches, k, new SimpleMatrix(0,0), sigMap1, sigMap2)
+	val lmatches = matcher.performMatching//.map{ m => (sigMap1.idToName(m._1), sigMap2.idToName(m._2), m._3)}
+
+	val acmatch = lmatches.filter{ m => m._1 == m._2 }.size
+	println("Actually matched "+acmatch)
+
+	lmatches.foreach{ m => unmatchedLeft -= sigMap1.nameToId(m._1); unmatchedRight -= sigMap2.nameToId(m._2) }
+	matches += lmatches
+      }
+
+      val finalMatches = matches.flatten.map{ m => (m._1, m._2) }
+      val numMatches = finalMatches.filter{ m => m._1 == m._2 }.size
+      val numPotentialMatches = g1.vertexSet.size.toFloat
+      println("Node Accuracy is "+numMatches+"/"+numPotentialMatches+" = "+100.0*(numMatches/numPotentialMatches)+"%")
+    }
+
+  }
+
+}

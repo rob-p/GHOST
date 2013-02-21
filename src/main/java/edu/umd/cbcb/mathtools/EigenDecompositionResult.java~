@@ -1,0 +1,20 @@
+package edu.umd.cbcb.mathtools;
+
+import org.apache.commons.math.linear.*;
+
+public class EigenDecompositionResult {
+
+    private boolean success;
+    private ArrayRealVector evals;
+    private ArrayRealVector[] evecs;
+    
+    public EigenDecompositionResult( boolean _success, ArrayRealVector _evals, ArrayRealVector[] _evecs ) {
+	success = _success;
+	evals = _evals;
+	evecs = _evecs;
+    }
+	
+    public ArrayRealVector getEvals() { return evals; }
+    public ArrayRealVector[] getEvecs() { return evecs; }
+    public boolean getSuccess() { return success; }
+}

@@ -1,0 +1,357 @@
+package edu.umd.cbcb.ghost.align
+
+import scopt._
+import scala.io._
+import scala.math._
+import scala.collection.mutable.{ HashSet => MHashSet, HashMap => MHashMap, ListBuffer }
+import scala.collection.parallel.{ ParIterable, ParMap => PMap }
+import scala.collection.parallel.mutable.{ ParHashSet => PMHashSet, ParHashMap => PMHashMap, ParArray }
+import scala.util.Random
+import scala.collection.JavaConversions._
+import scala.tools.nsc.io._
+import scala.io.Source
+
+import java.{ io => jio }
+import java.io.{ FileWriter => JFileWriter, BufferedWriter => JBufferedWriter, PrintWriter => JPrintWriter }
+import java.util.{ HashMap => JHashMap }
+
+import org.jgrapht.graph._
+import org.jgrapht.alg.{ ConnectivityInspector }
+import org.ejml.simple.SimpleMatrix
+import org.ejml.ops.NormOps
+
+import net.robpatro.utils.time.Timer
+import net.robpatro.utils.console.ProgressBar
+import edu.umd.cbcb.ghost.io.{ GEXFReader, EdgeListReader, SimpleVertex }
+import edu.umd.cbcb.ghost.graphtools.{ Utils, SequenceWeightedEdge }
+import edu.umd.cbcb.ghost.graphtools.actors._
+import edu.umd.cbcb.ghost.align.matchers._
+
+import grizzled.config.Configuration
+
+object GlobalAligner{
+  val logoString = """
+     ______ __  __ ____  _____ ______
+    / ____// / / // __ \/ ___//_  __/
+   / / __ / /_/ // / / /\__ \  / /
+  / /_/ // __  // /_/ /___/ / / /
+  \____//_/ /_/ \____//____/ /_/
+  """
+
+  type VertexT = SimpleVertex
+  type EdgeT = SequenceWeightedEdge
+  type GraphT = WeightedPseudograph[SimpleVertex, SequenceWeightedEdge]
+  type SubgraphT = Subgraph[SimpleVertex, SequenceWeightedEdge, GraphT]
+
+  /*
+   * Configuration Options
+   */
+  class Config {
+    var numActors = 0
+    var numBins = 20
+    var g1FileName = ""
+    var g2FileName = ""
+    var g1SigFile = ""
+    var g2SigFile = ""
+    var blastFile = ""
+    var outputDir = ""
+    var cfgFile = ""
+  }
+
+  def CreateGraph(sg: SubgraphT) = {
+    var vnmap = sg.vertexSet.map{ v => (v, (v.name,v.id)) }.toMap
+    var nvmap = new MHashMap[String, VertexT]
+    val g = new GraphT(classOf[ EdgeT ] );
+    sg.vertexSet.foreach{
+      v =>
+	val nid = vnmap(v);
+      val nvert = new VertexT(nid._1, nid._2);
+      nvmap(nid._1) = nvert
+      g.addVertex(nvert)
+    };
+    sg.edgeSet.foreach{
+      e =>
+	val src = nvmap( sg.getEdgeSource(e).name )
+      val tgt = nvmap( sg.getEdgeTarget(e).name )
+      val we = new SequenceWeightedEdge
+      g.addEdge( src, tgt, we )
+      g.setEdgeWeight( we, 1.0 )
+    }
+    g
+  }
+
+  case class ScoreMap(val map: Option[PMap[(String,String), Double]], val mv: Double) {
+    val sf = if (mv > 0) { 1.0 / mv } else { 1.0 }
+
+    private val _map = map.getOrElse( PMap.empty[(String,String), Double] )
+
+    def apply(k: (String,String)) = {
+      _map.get(k).getOrElse( mv ) * sf
+    }
+
+  }
+
+  def computeNearestNeighbors( lSigMap: SignatureMap, rSigMap: SignatureMap, unmatchedLeft: ParIterable[Int],
+			      unmatchedRight: ParIterable[Int], blastScores: Option[ScoreMap], a: Double, k: Int = 5 ) = {
+
+    val haveBlastScores = blastScores.isDefined
+    val alpha = if(haveBlastScores) { a } else { 1.0 }
+    val seqDist = blastScores.getOrElse( ScoreMap(None, 0.0) )
+    val khop = lSigMap.maxHop
+    val (maxG, maxH) = (lSigMap.maxDeg, rSigMap.maxDeg)
+
+    /* Weight Vector */
+    val avgDeg = 0.5 * (lSigMap.avgDeg + rSigMap.avgDeg)
+    var invFeatWeight = 0.0
+    val wvecDat = lSigMap.binWidths.zipWithIndex.flatMap{
+      wi =>
+	val (width, index) = wi
+      val fw = pow( avgDeg, -index)
+      invFeatWeight += fw
+      Array.fill(width){ fw }
+    }.toArray
+    invFeatWeight = (0.5 / invFeatWeight)
+    val wvec = new SimpleMatrix( Array(wvecDat) )
+
+    val pb = new ProgressBar( unmatchedLeft.size, "=" )
+    var i = 0
+    // val smatches = ParArray.fill[ ParArray[(Int,Int,Double)] ](unmatchedLeft.size){ ParArray.fill[(Int,Int,Double)](k){ (0, 0, 0.0) } }
+    val matches = unmatchedLeft.map{
+      lind: Int =>
+	val lname = lSigMap.idToName(lind)
+	val lsig = lSigMap.dmat.extractVector(true, lind)
+
+      val dists = unmatchedRight.map{
+	rind: Int =>
+
+	val rname = rSigMap.idToName(rind)
+	val rsig = rSigMap.dmat.extractVector(true, rind)
+
+	var dist = alpha * (invFeatWeight * NormOps.normP1( lsig.minus(rsig).elementMult(wvec).getMatrix ))
+	dist += (1.0 - alpha) * seqDist( (lname, rname) )
+	(rname, dist)
+      }.toArray
+
+      pb.update(i); i += 1
+      /*
+      var tdists: Array[(Int, Int, Double)] = null
+      var ndists = dists.filter{ x => x._2 <= k}
+      if (ndists.size > 0) {
+	tdists = ndists.map{ md => (lind, md._1, md._2) }
+      } else {
+	val mval = dists.maxBy{ indDist => indDist._2 }
+	tdists = Array( (lind, mval._1, mval._2) )
+      }
+      */
+      val ndists = dists.sortBy{ x => x._2 }.slice(0,k).map{ m => (lname, m._1, m._2) }
+      (lname, ndists.par)
+    }.seq.toMap
+
+    pb.done()
+    //println(tmatches)
+
+    // val matches = smatches.flatMap{ m => m }.toArray.par
+
+    // val ord = (m:(Int, Int, Double)) => m._3
+    // val (ma, mi) = (matches.maxBy(ord)._3, matches.minBy(ord)._3)
+    /*
+    val smatch = matches.sorted(ord)
+    ma = smatch.last._3; mi = smatch.head._3
+    //matches.sortBy{ m => m._3 }.foreach{  m => println(lSigMap.idToName(m._1) + " <=> "+ rSigMap.idToName(m._2) + " : "+ m._3); ma=max(ma,m._3); mi=min(mi,m._3) }
+    println("Min Dist = "+mi+", Max Dist = "+ma)
+    println("First = "+smatch.head._3+", last = "+smatch.last._3)
+    */
+
+    // val scaleFact = if (ma-mi > 0) { 1.0 / (ma-mi) } else { 1.0 }
+    // val nmatches = matches.map{ m => (lSigMap.idToName(m._1), rSigMap.idToName(m._2), (m._3-mi)*scaleFact )}
+    // println("There are %d potential matches to consider".format(nmatches.size))
+    matches
+  }
+
+  def main(args: Array[String]) {
+    var config = new Config
+    val parser = new OptionParser("ComputeSubgraphSignatures") {
+      intOpt("p", "numProcessors", "number of actors to use in parallel",
+	   { v: Int => config.numActors = v })
+      intOpt("n", "numBins", "number of histogram bins to use",
+             { v: Int => config.numBins = v })
+      opt("u", "g1", "first input graph",
+	{ v: String => config.g1FileName = v})
+      opt("v", "g2", "second input graph",
+	{ v: String => config.g2FileName = v})
+      opt("s", "s1", "first input signature file",
+	{ v: String => config.g1SigFile = v})
+      opt("t", "s2", "second input signature file",
+	{ v: String => config.g2SigFile = v})
+      opt("b", "blast", "Pairwise BLAST Scores",
+	  { v: String => config.blastFile = v})
+      opt("n", "numBins", "number of histogram bins to use",
+          { v: String => config.numBins = v.trim.toInt })
+      opt("o", "output", "output signature file",
+	{ v: String => config.outputDir = v})
+      opt("c", "config", "configuration file",
+	{ v: String => config.cfgFile = v})
+    }
+
+    if (parser.parse(args)) {
+
+      collection.parallel.ForkJoinTasks.defaultForkJoinPool.setParallelism(config.numActors)
+      val cfg = Configuration( Source.fromFile(config.cfgFile) )
+      val mainCfgOpt = cfg.getSection("main")
+      assert( !mainCfgOpt.isEmpty, "Configuration file must contain [main] section" )
+      val mainCfg = mainCfgOpt.get
+
+      println(logoString)
+
+      println("Options :")
+      mainCfg.options.foreach{ kv => println("\t %s : %s".format(kv._1, kv._2)) }
+
+      def getOrDie(k: String, msg: String) = {
+	val v = mainCfg.options.get(k)
+	assert(v.isDefined, msg)
+	v.get
+      }
+      /* Required configuration variables */
+      val g1File = getOrDie("network1", "configuration must have key \"network1\"")
+      val g2File = getOrDie("network2", "configuration must have key \"network2\"")
+
+      val g1SigFile = getOrDie("sigs1", "configuration must have key \"sigs1\"")
+      val g2SigFile = getOrDie("sigs2", "configuration must have key \"sigs2\"")
+
+      /* Optional configuration variables */
+      val numBinsStr = mainCfg.options.get("numbins").getOrElse("15"); val numBins = numBinsStr.toInt
+      val blastFileOpt = mainCfg.options.get("sequencescores")
+      val matchType = mainCfg.options.get("matcher").getOrElse("linear")
+      val alphaStr = mainCfg.options.get("alpha").getOrElse("0.5"); val alpha = alphaStr.toDouble
+      val validMatchTypes = Set("linear", "quadratic")
+      assert( validMatchTypes contains matchType, "matcher must be one of {linear | quadratic}")
+
+      val nn = mainCfg.options.get("nneighbors")
+
+      // Create a new GEXFReader and read in the graphs
+      val g1f = new GEXFReader(g1File, false).parse
+      val g2f = new GEXFReader(g2File, false).parse
+
+      var sg1 = new SubgraphT(g1f, g1f.vertexSet)
+      var sg2 = new SubgraphT(g2f, g2f.vertexSet)
+
+      // var sg1 = Utils.largestConnectedComponent(g1f)
+      // var sg2 = Utils.largestConnectedComponent(g2f)
+
+      val g1 = CreateGraph(sg1)
+      val g2 = CreateGraph(sg2)
+
+      val avgDeg1 = g1.vertexSet.toList.map{ x => g1.degreeOf(x) }.sum.toFloat / g1.vertexSet.size
+      val avgDeg2 = g2.vertexSet.toList.map{ x => g2.degreeOf(x) }.sum.toFloat / g2.vertexSet.size
+      val avgDeg = 0.5 * ( avgDeg1 + avgDeg2)
+      println("AVERAGE DEGREE IS : %f".format(avgDeg) )
+
+      val (sigMap1, sigMap2) = (new SignatureMap( g1SigFile, g1, numBins ), new SignatureMap( g2SigFile, g2, numBins ));
+
+      print("Reading Signatures for Network 1 . . . ")
+      sigMap1.readSignatures( g1SigFile, avgDeg )
+      println("Done")
+      print("Reading signatures for Network 2 . . . ")
+      sigMap2.readSignatures( g2SigFile, avgDeg )
+      println("Done")
+
+      var blastScores: Option[ ScoreMap ] = None
+      var maxScore = -Double.MaxValue
+      if ( blastFileOpt.isDefined ) {
+	println( "Using sequence information\nReading BLAST Scores from %s".format(blastFileOpt.get) )
+	val lit = Source.fromFile(blastFileOpt.get).getLines()
+	val smap = lit.map{
+	  l =>
+	    // get the input
+	    val Array(s,t,v) = l.split('\t')
+	  // keep track of the highest score
+	  val d = v.toDouble; maxScore = max(maxScore, d)
+	  // yield the map values
+	  ((s,t), d) }.toMap.par
+	blastScores = Some( ScoreMap(Some(smap), 2.0 * maxScore) )
+      } else {
+	println( "Not using sequence information" )
+      }
+
+      // Tried using mutable parallel hash set, but that collection
+      // is currently broken (see SI-4678)
+      var unmatchedLeft = Range(0, sigMap1.size).toSet.par
+      var unmatchedRight = Range(0, sigMap2.size).toSet.par
+
+      var k = nn match {
+	case None => 5
+	case Some("all") => unmatchedLeft.size
+	case Some(n) => n.toInt
+      }
+
+      println( "Considering %d nearest neighbors".format(k) )
+
+      val fmap = new JHashMap[SimpleVertex, SimpleVertex]
+      val rmap = new JHashMap[SimpleVertex, SimpleVertex]
+
+      val matches = new ListBuffer[Iterable[(String, String, Double)]]
+      while ( unmatchedLeft.size > 0 ) {
+
+	k = min(k, unmatchedLeft.size)
+	val pmatches = computeNearestNeighbors(sigMap1, sigMap2, unmatchedLeft, unmatchedRight, blastScores, alpha, k)
+	println("Found NEAREST NEIGHBORS")
+	val amatch = pmatches.filter{ m => m._1 == m._2 }.size
+	println("Almost matched "+amatch)
+
+	var matcher: Matcher = null
+	if (matchType == "linear") {
+	  matcher = new LAPMatcher(pmatches, sigMap1, sigMap2)
+	} else {
+	  matcher = new SpectralMatcher(pmatches, sigMap1, sigMap2)
+	}
+	val lmatches = matcher.performMatching.seq
+
+	lmatches.foreach{
+	  mp =>
+
+	  val g1v = sigMap1.nameVertexMap(mp._1)
+	  val g2v = sigMap2.nameVertexMap(mp._2)
+	  fmap.put(g1v, g2v)
+	  rmap.put(g2v, g1v)
+	}
+
+	val acmatch = lmatches.filter{ m => m._1 == m._2 }.size
+	println("Actually matched "+acmatch)
+
+	// Removed the matched nodes from consideration
+	val remLeft = lmatches.map{  m => sigMap1.nameToId(m._1) }.toSet
+	val remRight = lmatches.map{ m => sigMap2.nameToId(m._2) }.toSet
+	unmatchedLeft = unmatchedLeft &~ remLeft
+	unmatchedRight = unmatchedRight &~ remRight
+
+	// sigMap1.removeFromNeighborhoods(remLeft)
+	// sigMap2.removeFromNeighborhoods(remRight)
+
+	//lmatches.foreach{ m => unmatchedLeft -= sigMap1.nameToId(m._1); unmatchedRight -= sigMap2.nameToId(m._2) }
+	matches += lmatches
+      }
+
+      val lcc = Utils.largestConnectedComponent(g1f)
+      val finalMatches = matches.flatten.map{ m => (m._1, m._2) }
+      val numMatches = finalMatches.filter{ m => m._1 == m._2 }.size
+      val numPotentialMatches = lcc.vertexSet.size.toFloat
+      println("Node Accuracy is "+numMatches+"/"+numPotentialMatches+" = "+100.0*(numMatches/numPotentialMatches)+"%")
+
+      val gmap = new DefaultGraphMapping(fmap, rmap, g1, g2)
+      val e1 = g1.edgeSet
+      val nedges = e1.size
+      val nmapped = e1.count{ e1 => gmap.getEdgeCorrespondence(e1,true) != null }
+      println("Edge Accuracy is %d / %d = %f %%".format(nmapped, nedges, 100.0*(nmapped.toDouble/nedges)) )
+
+      // Write the alignment to file
+      if (! config.outputDir.isEmpty ) {
+	val ofile = new JPrintWriter( new JBufferedWriter( new JFileWriter(config.outputDir)) )
+	finalMatches.foreach{ st => ofile.println("%s\t%s".format(st._1, st._2)) }
+	ofile.close
+      }
+
+    }
+
+  }
+
+}

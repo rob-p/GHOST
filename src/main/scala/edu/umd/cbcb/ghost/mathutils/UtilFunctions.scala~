@@ -1,0 +1,39 @@
+package edu.umd.cbcb.ghost.mathutils
+
+import org.ejml.simple._
+import org.ejml.data._
+import org.ejml.ops.NormOps
+
+object UtilFunctions { 
+
+  def cosineDistance( v1 : SimpleMatrix, v2 : SimpleMatrix ) = {
+    (1.0 - v1.dot(v2)) / ( NormOps.normP2(v1.getMatrix) * NormOps.normP2(v2.getMatrix) )
+  }
+  
+}
+
+/*
+def quadraticChi( l: SimpleMatrix, r: SimpleMatrix, A: SimpleMatrix, m: Double ) = { 
+  val Z = l.plus(r).mult(A)
+  val N = Z.numRows
+  val M = Z.numCols
+
+  // Z ( Z == 0 ) = 1 && Z.^m && Z = 1.0 ./ Z
+  for( i <- 0 until N; j <- 0 until M ) { 
+    val v = if (Z.get(i,j) == 0.0) { 1.0 } else { Z.get(i,j) }
+    Z.set(i, j, 1.0 / pow(v,m) ) 
+  }
+
+  // (l-r) * (1.0 / Z)
+  val D = (l.minus(r)).elementMult(Z)
+
+  // dist = sqrt( max( D * A * D', 0.0 ) )
+  sqrt( max( D.mult(A).mult(D.transpose()).get(0,0), 0.0) )
+}
+
+def  klDiv( l: Array[Double], r: Array[Double]) = { 
+  (0 until l.size).foldLeft(0.0){ (total, i) => 
+    if (r(i) > 0 && l(i) > 0) { total + (l(i) * log( l(i) / r(i) )) } else { total }
+			       }
+}
+*/

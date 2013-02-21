@@ -1,0 +1,191 @@
+package edu.umd.cbcb.mathtools;
+
+import org.netlib.arpack.ARPACK;
+import org.netlib.util.StringW;
+import org.netlib.util.booleanW;
+import org.netlib.util.doubleW;
+import org.netlib.util.floatW;
+import org.netlib.util.intW;
+
+import org.apache.commons.math.linear.*;
+import org.apache.commons.math.random.RandomDataImpl;
+import org.apache.commons.math.linear.EigenDecompositionImpl;
+
+import java.lang.Math;
+import java.util.Arrays;
+
+class EigenDecomposerARPACK {
+  
+   public static class EigenDecompositionResult {
+	private boolean success;
+	private ArrayRealVector evals;
+	private ArrayRealVector[] evecs;
+
+	public EigenDecompositionResult( boolean _success, ArrayRealVector _evals, ArrayRealVector[] _evecs ) {
+	    success = _success;
+	    evals = _evals;
+	    evecs = _evecs;
+	}
+	
+	public ArrayRealVector getEvals() { return evals; }
+	public ArrayRealVector[] getEvecs() { return evecs; }
+	public boolean getSuccess() { return success; }
+    }
+
+    public static <MatT extends AbstractRealMatrix> EigenDecompositionResult decompose( MatT mat, int _k, String _which ) {
+	ARPACK apack = ARPACK.getInstance();
+	String[] errors = {"Normal exit.", 
+			   "N must be positive.",
+			   "NEV must be positive.", 
+			   "NCV must be greater than NEV and less than or equal to N.",
+			   "WHICH must be one of 'LM', 'SM', 'LA', 'SA' or 'BE'.", 
+			   "BMAT must be one of 'I' or 'G'.", 
+			   "Length of private work WORKL array is not sufficient.",
+			   "Error return from trid. eigenvalue calculation", 
+			   "Information error from LAPACK routine dsteqr.", 
+			   "Starting vector is zero.",
+			   "IPARAM(7) must be 1,2,3,4,5.", 
+			   "IPARAM(7) = 1 and BMAT = 'G' are incompatible.", 
+			   "NEV and WHICH = 'BE' are incompatible.",
+			   "DSAUPD did not find any eigenvalues to sufficient accuracy.", 
+			   "HOWMNY must be one of 'A' or 'S' if RVEC = .true.", 
+			   "HOWMNY = 'S' not yet implemented"};
+ 
+	intW nev = new intW(_k);
+	int nevv = nev.val;
+	int lenAF = 2 * _k;
+	int ncv = Math.min( mat.getRowDimension(), lenAF );
+	int maxncv = Math.min( mat.getRowDimension(), ncv+2 );
+	String bmat = "I";
+	String which = _which;
+    
+	int n = mat.getRowDimension();
+	int maxn = n;
+    
+	double[] workl = new double[3*maxncv*maxncv + 6*maxncv];
+	double[] d = new double[3*maxncv];
+	double[] resid = new double[maxn];
+	double[] v = new double[maxn*maxncv];
+	ArrayRealVector workd = new ArrayRealVector(3*maxn);
+      
+	doubleW tol = new doubleW(1e-8);
+	double told = tol.val;
+	intW ido = new intW(0);
+	intW info = new intW(0);
+	intW ierr = new intW(0);
+	int ishifts = 1;
+	int maxitr = 300;
+	int model = 1;
+	int[] iparam = new int[11];
+	int[] ipntr = new int[14];
+	boolean[] select = new boolean[maxncv];
+	int ldv = maxn;
+	int lworkl = ncv * (ncv + 8);
+    
+	int arg21 = 1;
+	intW arg22 = new intW(2);
+
+	double sigma = 0.0;
+	iparam[0] = ishifts;
+	iparam[2] = maxitr;
+	iparam[6] = model;
+      
+	boolean iter = true;
+	do {
+	    apack.dsaupd(ido, bmat, n, which, nevv, tol, resid, ncv, v, ldv,
+			 iparam, ipntr, workd.getDataRef(), workl, lworkl, info); //, arg21, arg22);
+
+	    if ( ido.val == -1 || ido.val == 1 ) {
+
+		int s1 = ipntr[0]-1;
+		int s2 = ipntr[1]-1;
+		ArrayRealVector v1 = new ArrayRealVector(workd.getDataRef(), s1, n);
+		workd.setSubVector(s2, mat.operate(v1.getDataRef()));
+	    } else {
+		iter = false;
+	    }
+
+	} while ( iter );
+      
+	// check for convergence or error
+	if (info.val < 0) {
+	    System.out.println("ARPACK ERROR : "+errors[-info.val]);
+	} else {
+	    boolean rvec = true;
+	    nev = new intW(nevv);
+	    told = tol.val;
+	    apack.dseupd(rvec, "All", select, d, v, ldv, sigma, bmat, n, which,
+			 nev, told, resid, ncv, v, ldv, iparam, ipntr, workd.getDataRef(),
+			 workl, lworkl, ierr);//, arg21, arg22);
+	}
+      
+	ArrayRealVector ew = null;
+	ArrayRealVector[] ev = null;
+	boolean success = false;
+	EigenDecompositionResult res = new EigenDecompositionResult(success, ew, ev);
+	if (ierr.val != 0) {
+	    System.out.println("Got back IERR = "+ierr.val);
+	    success = false;
+	} else {
+	    int numEigenVec = nev.val;
+	    ew = new ArrayRealVector(d, 0, numEigenVec);
+	    int nconv = iparam[4];
+	    ev = new ArrayRealVector[nconv];
+	    for (int i=0; i < nconv; ++i) {
+		ev[i] = new ArrayRealVector(v, i*n, n);
+	    }
+	    success = true;
+	    res = new EigenDecompositionResult(success, ew, ev);
+	}
+
+	return res;
+    }
+
+    public static void main( String[] args ) { 
+	RandomDataImpl rand = new RandomDataImpl();
+	double density = Double.parseDouble(args[1]);
+	int N = Integer.parseInt(args[0]);
+	OpenMapRealMatrix M = new OpenMapRealMatrix(N,N);
+	for (int i = 0; i < N; ++i) {
+	    for (int j = i; j < N; ++j) { 
+		double nr = rand.nextUniform(0.0, 1.0);
+		if (nr > (1.0 - density)) { 
+		    double e = rand.nextUniform(0.1,1.0);
+		    M.setEntry(i,j,e);
+		    M.setEntry(j,i,e);
+		}
+	    }
+	}
+
+	System.out.println("              Input Matrix                ");
+	System.out.println("=========================================");
+	System.out.println(M);
+	System.out.print("\n\n");
+
+	EigenDecompositionResult res = EigenDecomposerARPACK.decompose(M, 4, "LA");
+
+	String sstring;
+	if ( res.getSuccess() ) { sstring = "Succeeded"; } else { sstring = "Failed"; }
+
+	System.out.println("      Results computed with ARPACK       ");
+	System.out.println("=========================================");
+
+	System.out.println("Decomposition : "+sstring);
+	System.out.println("Eigenvalues : "+res.getEvals().toString());
+	System.out.println("Eigenvectors : ");
+	ArrayRealVector[] evecs = res.getEvecs();
+	for (int i=0; i < evecs.length; ++i ) {
+	    System.out.println(evecs[i]);
+	}
+
+	System.out.print("\n\n");
+	EigenDecompositionImpl ed = new EigenDecompositionImpl(M, 1e-8);
+	System.out.println("Results computed with Apache Commons Math");
+	System.out.println("=========================================");
+
+	System.out.println("Eigenvalues : "+Arrays.toString(ed.getRealEigenvalues()));
+	System.out.println("Eigenvectors : ");
+	System.out.println(ed.getV());
+    }
+  
+}

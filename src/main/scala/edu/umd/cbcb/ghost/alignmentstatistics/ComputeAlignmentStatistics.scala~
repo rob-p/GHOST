@@ -1,0 +1,46 @@
+package edu.umd.cbcb.ghost.alignmentstatistics
+
+import scopt._
+import scala.io._
+import scala.math._
+
+import java.{ io => jio }
+import java.io.{ FileWriter => JFileWriter, BufferedWriter => JBufferedWriter, PrintWriter => JPrintWriter }
+
+import edu.umd.cbcb.ghost.io.{ GEXFReader, EdgeListReader, SimpleVertex }
+import edu.umd.cbcb.ghost.graphtools.{ Utils, SequenceWeightedEdge }
+
+object ComputeAlignmentStatistics { 
+  /**
+   * Configuration Options
+   */
+  class Config { 
+    var alignment = ""
+    var g1FileName = ""
+    var g2FileName = ""
+  }
+  
+  def main( args: String[] ) = { 
+    var config = new Config
+    val parser = new OptionParser("ComputeSubgraphSignatures") { 
+      opt("u", "g1", "first input graph",
+	{ v: String => config.g1FileName = v})
+      opt("v", "g2", "second input graph",
+	{ v: String => config.g2FileName = v})
+      opt("a", "alignment", "alignment file",
+	{ v: String => config.alignment = v})
+    }
+
+    if (parser.parse(args)) {
+      // Create a new GEXFReader and read in the graphs
+      val g1f = new GEXFReader(g1File, false).parse
+      val g2f = new GEXFReader(g2File, false).parse
+      
+      var sg1 = new SubgraphT(g1f, g1f.vertexSet) // Utils.largestConnectedComponent(g1f)
+      var sg2 = new SubgraphT(g2f, g2f.vertexSet) // Utils.largestConnectedComponent(g2f)
+
+    }
+
+  }
+
+}

@@ -1,0 +1,10 @@
+import scalax.io._
+
+object BlastToSimple {
+
+  def main( argv: Array[String] ) {
+    def  
+
+  }
+
+}

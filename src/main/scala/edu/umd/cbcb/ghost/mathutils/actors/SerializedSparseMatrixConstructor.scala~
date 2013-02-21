@@ -1,0 +1,41 @@
+
+case class AddEntry( i: Int, j: Int, e: Double )
+// Tells the actor that they are done
+case class Stop()
+
+class SubgraphDescriptorReceiver[MatT <: RealMatrix]( val m: MatT ) extends Actor { 
+
+  var numReceivedDesc = 0
+  val pb = new ProgressBar( reqNumDesc, "*" )
+  //val descFile = new JDataOutputStream( new JBufferedOutputStream( new JFileOutputStream(descFileName) ) )
+
+  // Write the total number of descriptors to the top of the file
+  descFile.writeInt(reqNumDesc)
+  descFile.writeInt(k)
+
+  def act() = { 
+
+    loopWhile( !done ) { 
+      react { 
+	case SubgraphDescriptorMsg( desc ) => { 
+	  writeDescriptor(desc)
+	  pb.update(numReceivedDesc)
+	}
+	case Stop() => { 
+	  pb.done()
+	  exit()
+	}
+      } // end react
+    } // end loopWhile
+
+  }
+  
+  def done() = { numReceivedDesc == reqNumDesc }
+
+  def writeDescriptor( desc : SubgraphDescriptor ) = { 
+    desc.writeToOutputStream( descFile )
+    numReceivedDesc += 1
+  }
+
+}
+

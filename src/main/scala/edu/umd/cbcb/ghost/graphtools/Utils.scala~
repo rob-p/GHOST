@@ -1,0 +1,20 @@
+package edu.umd.cbcb.ghost.graphtools
+
+import scala.collection.JavaConversions._
+
+import org.jgrapht.graph._
+import org.jgrapht.alg.{ ConnectivityInspector }
+
+object Utils { 
+
+  def largestConnectedComponent[V, E]( g: SimpleWeightedGraph[V,E] ): Subgraph[V, E, SimpleWeightedGraph[V,E]] = { 
+    type SubgraphT = Subgraph[V,E, SimpleWeightedGraph[V,E]]
+    /** Extract the largest connected component from each graph **/
+    var ci = new ConnectivityInspector(g)
+    // Sort the connected components in *descending* order
+    var vertexSets = ci.connectedSets.sortWith { (x, y) => x.size > y.size }
+    // Grab the largest connected component of G
+    new SubgraphT(g, vertexSets(0))
+  }
+
+}

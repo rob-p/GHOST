@@ -1,0 +1,12 @@
+package edu.umd.cbcb.ghost.align
+
+case class ScoreMap(val map: Option[PMap[(String,String), Double]], val mv: Double) { 
+  val sf = if (mv > 0) { 1.0 / mv } else { 1.0 }
+  
+  private val _map = map.getOrElse( PMap.empty[(String,String), Double] )
+
+  def apply(k: (String,String)) = { 
+    _map.get(k).getOrElse( mv ) * sf
+  }
+
+}

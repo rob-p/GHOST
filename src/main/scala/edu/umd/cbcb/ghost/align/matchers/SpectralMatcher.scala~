@@ -1,0 +1,284 @@
+
+package edu.umd.cbcb.ghost.align.matchers
+
+import scala.math._
+import scala.util.Random
+import scala.collection._
+import scala.collection.JavaConversions._
+import scala.collection.parallel.mutable.ParArray
+import scala.collection.parallel.immutable.ParMap
+import scala.collection.parallel.ParIterable
+import java.util.concurrent.{ ConcurrentHashMap => PHMap }
+
+import edu.umd.cbcb.ghost.io.SimpleVertex
+import edu.umd.cbcb.ghost.align.SignatureMap
+import edu.umd.cbcb.ghost.matchers.actors._
+
+import org.jgrapht.alg.FloydWarshallShortestPaths
+
+import org.ejml.simple.SimpleMatrix
+import org.ejml.data.DenseMatrix64F
+import org.ejml.ops.NormOps
+
+import org.apache.commons.math.linear._
+
+import net.robpatro.utils.time.Timer
+import net.robpatro.utils.console.ProgressBar
+import edu.umd.cbcb.mathtools.EigenDecomposerARPACK
+import edu.umd.cbcb.mathtools.EigenDecompositionResult
+import edu.umd.cbcb.mathtools.{ MatVecMult, ApacheMatVecMult, COOMatVecMult }
+
+class SpectralMatcher( matches: Map[String, ParArray[(String, String, Double)]], ls: SignatureMap, rs: SignatureMap ) extends Matcher(matches, ls, rs) { 
+  var first = true
+  
+  private def computeJointSpectra( S: SignatureMap, nodes: ParArray[String] ): PHMap[(String,String), SimpleMatrix] = { 
+    val N = nodes.size 
+    var reqNumSpec = 0 //(N * N) / 2 
+    val cmap = new PHMap[(String, String), SimpleMatrix]
+
+    // Create the actors that will be responsible for computing the joint spectra 
+    def createJointSpectrumActors( n: Int, k: Int ) = { 
+      val extractorArray = new Array[JointSpectrumComputer](n)
+      (0 until n).foreach{ 
+ 	i =>
+ 	  extractorArray(i) = new JointSpectrumComputer(S, k, cmap)
+ 	extractorArray(i).start
+      }
+      extractorArray
+    }
+
+    val extractors = createJointSpectrumActors( 30, 2 )
+    val numExtractors = extractors.size
+
+    val rgen = new Random()
+    val nnodes = nodes.size
+    for( i <- 0 until nnodes; j <- i until nnodes ) { 
+      reqNumSpec += 1
+      extractors( rgen.nextInt(numExtractors) ) ! ComputeJointSpectrum( nodes(i), nodes(j) ) 
+    }
+    
+    val pb = new ProgressBar( reqNumSpec, "*" )
+
+    while ( cmap.size < reqNumSpec ) {  
+      pb.update(cmap.size)
+      Thread.sleep(1500)
+    }
+
+    pb.update(cmap.size)
+    pb.done
+
+    (0 until numExtractors).foreach{ i => extractors( i ) ! Stop() }
+    val specMap = cmap 
+    assert( specMap.size >= reqNumSpec, "SpecMap size is "+specMap.size+", but we need "+reqNumSpec+" entries " )
+    specMap
+  }
+
+  private def fsweight( nu: Set[SimpleVertex], nv: Set[SimpleVertex], navg: Double ) = { 
+    val uiv = (nu & nv).size
+    val uuv = (nu | nv).size
+    val umv = (nu &~ nv).size
+    val vmu = (nv &~ nu).size
+    val lambda = max( 0.0, navg - (umv + uiv))
+
+    ( (2.0*uiv) / (umv + 2.0*uiv + lambda) ) * ( (2.0 * uiv) / (vmu + 2.0*uiv + lambda))
+  }
+
+  private def jaccardDistance( nu: Set[String], nv: Set[String] ) = { 
+    val uiv = (nu & nv).size.toFloat
+    val uuv = (nu | nv).size.toFloat
+    1.0 - ( uiv / uuv )
+  }
+
+  private def constructQAP() = { 
+    var weights = matches.flatMap{ kv => kv._2}.map{ kv => 1.0 - kv._3 }
+    var scale = 1.0 / weights.max
+    weights = weights.map{ w => w*scale }
+
+    val kN = weights.size
+    val maxval = max(1, (kN*(kN+1)/2))
+    var i = 0
+    val (maxWeight, minWeight) = (weights.max, weights.min)
+    val mdiag = weights
+    
+    Random.setSeed(System.currentTimeMillis)
+    val nodesG = Random.shuffle( matches.keys.toList ).sortBy{ s: String => ls.avgDensity(s) }.toArray.par
+    val nodesH = Random.shuffle( matches.flatMap{ x => x._2 }.map{ x => x._2 }.toList ).sortBy{ s: String => rs.avgDensity(s) }.toArray.par
+
+    // val jointSpectraG = computeJointSpectra( ls, nodesG )
+    // val jointSpectraH = computeJointSpectra( rs, nodesH )
+
+    var pb = new ProgressBar( matches.keys.size, "*" )
+    scale = 1.0 / kN
+    var (ma,mi) = (-Double.MaxValue, Double.MaxValue)
+
+    // Map from each key to the index in the flattened map of matches where it's entries start
+    val keyIndMap = matches.keysIterator.drop(1).scanLeft( (matches.head._1, 0) ){  (x,y) => (y, x._2 + matches(x._1).size) }.toMap
+    val vertsG = ls.G.vertexSet
+    val vertsH = rs.G.vertexSet
+    val navg = ((1.0 / vertsG.size) * vertsG.map{ v => ls.G.degreeOf(v) }.sum ) +
+    ((1.0 / vertsH.size) * vertsH.map{ v => rs.G.degreeOf(v) }.sum)
+
+    var ctr = 0
+
+    import scala.actors.Futures
+    import scala.actors.Future
+    import scala.collection.mutable.ArrayBuffer
+
+    def computeRow( k: String, rrange: Range ) : Future[(Array[Int],Array[Int],Array[Double])]  = { 
+      Futures.future{ 
+	
+      val ri = new java.util.concurrent.ConcurrentLinkedQueue[Int]
+      val ci = new java.util.concurrent.ConcurrentLinkedQueue[Int]
+      val e = new java.util.concurrent.ConcurrentLinkedQueue[Double]	
+      val nei = ls.neighborhoodByName(k, 1).map{ x => x.name }.toSet
+
+      matches(k).zipWithIndex.foreach{ 
+	outerMatchInd  =>
+	  val (vi, vip, p) = outerMatchInd._1
+	  val rowInd = keyIndMap(vi) + outerMatchInd._2 
+
+	// The neighborhood of vip in H
+	val neip = rs.neighborhoodByName(vip, 1).map{ x => x.name }.toSet
+
+	// The set of matches for all vj s.t. vj \in N(vi)
+	val adjKeys = nei.filter{ n => (matches.keys contains n) && keyIndMap(vi) > keyIndMap(n) }
+
+	// If there are any other matches compatible with (vi, vip)
+	if (adjKeys.size > 0) { 
+	  // Score each compatible match
+	  adjKeys.foreach{ nkey =>
+	    
+	    matches(nkey).zipWithIndex.foreach{ innerMatchInd =>
+	        
+		val (vj, vjp, q) = innerMatchInd._1;
+		// if ( neip contains vjp ) { 
+		  val colInd = keyIndMap(vj) + innerMatchInd._2
+		  
+		  val nej = ls.neighborhoodByName(vj, 1).map{ x => x.name }.toSet
+		  val nejp = rs.neighborhoodByName(vjp, 1).map{ x => x.name }.toSet
+		  
+		  val int = (nei & nej).size
+		  val e1 = jaccardDistance(nei, nej)
+		  val e2 = jaccardDistance(neip, nejp)
+		  
+		  val s = if ( (e1+e2) > 0.0  ) { 
+		    1.0 - abs(e1-e2)
+		  } else { 0.0 }
+		  
+		  /*
+		  val s = exp( -abs(p-q) / (p + q) )
+		  */
+	  	  if (s > 0.0) { 
+		    ri.add(rowInd); ci.add(colInd);
+		    ri.add(colInd); ci.add(rowInd);
+		    e.add(s); e.add(s);
+		  }
+		//}
+	    }
+	}
+      }
+      }
+	val retr = ri.map{ x => x.toInt }.toArray
+	val retc = ci.map{ x => x.toInt }.toArray
+	val rete = e.map{ x => x.toDouble }.toArray
+      (retr, retc, rete) // (ri.toArray(Array.empty[Int]),ci.toArray(Array.empty[Int]),e.toArray(Array.empty[Double]))
+      }
+    }
+  
+
+    val matRows = matches.keysIterator.map{ k => computeRow(k, keyIndMap(k) until kN) }
+   
+    //val entries = new PHMap[(Int,Int), Double]
+    val rib = new ArrayBuffer[Int]
+    val cib = new ArrayBuffer[Int]
+    val eb = new ArrayBuffer[Double]
+    ctr = 0
+    
+    matRows.foreach{ 
+      f => 
+      pb.update(ctr); ctr += 1; 
+      val (ri, ci, e) = f()
+      rib ++= ri
+      cib ++= ci
+      eb ++= e
+    }
+
+    // Fill in the elements along the diagonal
+    val n2 = matches.head._2.size
+
+//    rib ++= (0 until kN)
+//    cib ++= (0 until kN)
+//    eb ++= weights.toIterator
+    
+    assert(rib.size == cib.size, "FINAL : Found rowind.size = "+rib.size+" but cind.size = "+cib.size)
+    assert(rib.size == eb.size, "FINAL : Found rowind.size = "+rib.size+" but e.size = "+eb.size)
+
+    pb.done
+        
+    scale = 1.0 / ma
+
+    // Scale the matrix
+    //val mit = M.iterator(true, 0, 0, kN-1, kN-1)
+
+    // return the matrix
+    var ret : MatVecMult = null
+    if ( kN > 10 ) { 
+      ret = new COOMatVecMult(rib.toArray, cib.toArray, eb.toArray, kN, kN)
+    } else { 
+      val M = new OpenMapRealMatrix(kN, kN)
+      (0 until rib.size).foreach{ 
+	i => M.setEntry(rib(i), cib(i), eb(i))
+      }
+      ret = new ApacheMatVecMult(M)
+    }
+    ret
+  }
+
+  override def performMatching: ParArray[MatchType] = {
+    val M = constructQAP
+    val N = matches.size * matches.head._2.size
+    
+    var evec = Array.empty[Double]
+
+    // With anything but a tiny matrix, use ARPACK
+    if (N > 10) {  
+
+      val n = min(4,N-1)
+      val eigenDecomp = EigenDecomposerARPACK.decompose(M, n, "LA")
+      if ( !eigenDecomp.getSuccess ) { 
+	println("EigenDecomposition Failed!")
+      } 
+      
+      val evals = eigenDecomp.getEvals
+      val numEV = evals.size
+      println("Eigenvalues : "+evals)
+      val inds = evals.zipWithIndex.sortBy{ vi => vi._1 }.map{  vi => vi._2 }
+      val evecs = eigenDecomp.getEvecs
+
+      require( evals.size == evecs.size, println("Size of evals is %d, but size of evecs is %d".format(evals.size, evecs.size) ) )
+
+      evec = evecs( inds(numEV-1) ) 
+
+    } else { 
+      // Otherwise use a simpler Eigendecomposition routine
+      val mvm = M.asInstanceOf[ApacheMatVecMult[OpenMapRealMatrix]]
+      val decomposer = new EigenDecompositionImpl( mvm.getMat.add( mvm.getMat.transpose() ).scalarMultiply( 0.5 )  , 0.0)
+      val evals = decomposer.getRealEigenvalues()
+      println("Eigenvalues : {"+evals.mkString(",")+"}")
+      val numEV = evals.size
+      val inds = evals.zipWithIndex.sortBy{ vi => vi._1 }.map{  vi => vi._2 }
+      evec = decomposer.getV.getColumn( inds(numEV-1) )
+
+    }
+
+    var x = evec.map{ x => 1.0 - x }.par
+    //(0 until N).foreach{ i => x(i) = exp(- abs(evecs(i)) ) }
+    //while( mit.hasNext ) { x(i) = exp(- abs(mit.next.getValue) ); i += 1 } 
+    //val x = evec.iterator(true,0,0,N,0).map{ x => exp(-x) } 
+    val xstar = binarizeSolutionOptimal( matches.flatMap{ x => x._2 }.map{ y => y._3 }.toArray.par , matches.flatMap{ x  => x._2 }.toArray.par )
+    val retMatch = matches.flatMap{ x => x._2 }.zipWithIndex.filter{ mi => xstar(mi._2) == 1}.map{ mi => mi._1 }
+    retMatch.toArray.par
+  }
+
+	
+}
