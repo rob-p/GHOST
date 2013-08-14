@@ -5,9 +5,9 @@ organization := "University of Maryland"
 
 name := "GHOST"
 
-version := "0.1"
+version := "1.0"
 
-scalaVersion := "2.10.1-RC1"
+scalaVersion := "2.10.2"
 
 crossScalaVersions := Seq("2.10")
 

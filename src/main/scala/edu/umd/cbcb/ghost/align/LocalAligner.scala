@@ -61,6 +61,7 @@ object LocalAligner{
     var constrainedRatio = Option.empty[Double]//1.0
     var alpha = Option.empty[Double]
     var beta = Option.empty[Double]
+    var distanceDumpFile = Option.empty[String]
     var g1FileName = ""
     var g2FileName = ""
     var g1SigFile = ""
@@ -118,7 +119,7 @@ object LocalAligner{
     blastScores: Option[ScoreMap],
     a: Double,
     k: Int = 5,
-    inferAlpha: Boolean ) = {
+    inferAlpha: Boolean) = {
 
     val haveBlastScores = blastScores.isDefined
     val alpha = if(haveBlastScores) { a } else { 1.0 }
@@ -330,6 +331,9 @@ object LocalAligner{
              { v: Double => config.beta = Some(v) })
       doubleOpt("r", "unconstrained", "percentage of local swaps which should be allowed to be unconstrained",
              { v: Double => config.constrainedRatio = Some(v) } )
+      opt("d", "dumpDistances", "dump spectral distances to this file",
+          {v: String => config.distanceDumpFile = Some(v.trim)})
+
       opt("u", "g1", "first input graph",
 	{ v: String => config.g1FileName = v.trim})
       opt("v", "g2", "second input graph",
@@ -369,9 +373,9 @@ object LocalAligner{
       //mainCfg.options.foreach{ kv => println("\t %s : %s".format(kv._1, kv._2)) }
 
       def getOrDie(k: String, msg: String) = {
-	val v = mainCfg.options.get(k)
-	assert(v.isDefined, msg)
-	v.get
+       val v = mainCfg.options.get(k)
+       assert(v.isDefined, msg)
+       v.get
       }
       /* Required configuration variables */
       val g1File = getOrDie("network1", "configuration must have key \"network1\"")
@@ -519,7 +523,28 @@ object LocalAligner{
       val pbar = new ProgressBar( sigMap1.size, "#" )
       val matches = MMap.empty[String, String]//MHashSet.empty[(String, String, Double)]
       var round = 0
-      val (dmatches, cAlpha) = computeDistances(sigMap1, sigMap2, unmatchedLeft, unmatchedRight, blastScores, alpha, k, inferAlpha)
+      val (dmatches, cAlpha) = computeDistances(sigMap1, sigMap2, unmatchedLeft, 
+                                                unmatchedRight, blastScores, alpha, k, 
+                                                inferAlpha)
+      // If the user requested us to dump the computed spectral
+      // distances to a file, then do so and then exit.
+      if (config.distanceDumpFile.isDefined) {
+        val distFileName = config.distanceDumpFile.get
+        val distFile = new JPrintWriter(
+                       new JBufferedWriter(
+                       new JFileWriter(distFileName)))
+
+        dmatches.foreach( m =>
+          distFile.print(s"${m._1}\t${m._2}\t${m._3._1}\n")
+        );
+
+        distFile.close()
+
+        println(s"Wrote distances to $distFileName; exiting.\n")
+        system.shutdown
+        System.exit(0)
+      }
+
       var (mm, pq) = getNearestNeighbors(dmatches, alpha)//computeNearestNeighbors(sigMap1, sigMap2, unmatchedLeft, unmatchedRight, blastScores, alpha, k)
 
       while ( !(pq.isEmpty) && alignment.size < n1 ) { 
