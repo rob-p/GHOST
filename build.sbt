@@ -1,5 +1,19 @@
+import AssemblyKeys._
 
-//import AssemblyKeys._
+assemblySettings
+
+jarName in assembly := "Ghost.jar"
+
+test in assembly := {}
+
+mergeStrategy in assembly <<= (mergeStrategy in assembly) { (old) =>
+  {
+    case PathList("com", "sun", "jna", xs @ _*) => MergeStrategy.first
+    case x => old(x)
+  }
+}
+
+mainClass in assembly := Some("edu.umd.cbcb.ghost.align.LocalAligner")
 
 organization := "University of Maryland"
 
@@ -10,12 +24,6 @@ version := "1.0"
 scalaVersion := "2.10.2"
 
 crossScalaVersions := Seq("2.10")
-
-//seq(assemblySettings:_*)
-
-//seq(com.github.retronym.SbtOneJar.oneJarSettings: _*)
-
-seq(ProguardPlugin.proguardSettings : _*)
 
 unmanagedSources in Compile ~= { srcFiles => srcFiles.filterNot{ x => x.name.contains("GenerateBioPlotFile") } }
 
@@ -64,20 +72,18 @@ libraryDependencies ++= Seq(
 )
 
 
-makeInJarFilter <<= (makeInJarFilter) {
-  (makeInJarFilter) => {
-    (file) => file match {
-      case "arpack_combined_all-0.1.jar" => makeInJarFilter(file) + ",!META-INF/**,!org/**"
-      case "jgrapht-jdk1.6.jar" => makeInJarFilter(file) + ",!org/**"
-      case _ => makeInJarFilter(file) + ",!**/*.RSA,!**/*.SF,!**/*.INF"
-    }
-  }
-}
+//makeInJarFilter <<= (makeInJarFilter) {
+//  (makeInJarFilter) => {
+//    (file) => file match {
+//      case "arpack_combined_all-0.1.jar" => makeInJarFilter(file) + ",!META-INF/**,!org/**"
+//      case "jgrapht-jdk1.6.jar" => makeInJarFilter(file) + ",!org/**"
+//      case _ => makeInJarFilter(file) + ",!**/*.RSA,!**/*.SF,!**/*.INF"
+//    }
+//  }
+//}
 
-proguardOptions ++= Seq(
-  keepMain("edu.umd.cbcb.ghost.align.ComputeSubgraphSignatures"),
-  keepMain("edu.umd.cbcb.ghost.align.LocalAligner"),
-  keepAllScala
-)
-
-
+//proguardOptions ++= Seq(
+//  keepMain("edu.umd.cbcb.ghost.align.ComputeSubgraphSignatures"),
+//  keepMain("edu.umd.cbcb.ghost.align.LocalAligner"),
+//  keepAllScala
+//)

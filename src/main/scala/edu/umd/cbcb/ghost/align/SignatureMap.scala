@@ -21,7 +21,7 @@ import edu.umd.cbcb.ghost.graphtools.{ LaplacianCalculator, SequenceWeightedEdge
 import org.ejml.data.DenseMatrix64F
 import org.ejml.simple.SimpleMatrix
 
-class SignatureMap( val name: String, val G: WeightedPseudograph[SimpleVertex, SequenceWeightedEdge], val numBins: Int ) {
+class SignatureMap(val name: String, val G: WeightedPseudograph[SimpleVertex, SequenceWeightedEdge] ) {
   type GraphT = WeightedPseudograph[SimpleVertex, SequenceWeightedEdge]
   type SubgraphT = Subgraph[SimpleVertex, SequenceWeightedEdge, GraphT]
 
@@ -32,7 +32,7 @@ class SignatureMap( val name: String, val G: WeightedPseudograph[SimpleVertex, S
   var avgDensity: collection.concurrent.Map[String, Double] = new CHMap[String, Double]()
   var spectra: collection.concurrent.Map[String, ArrayBuffer[Array[Double]]] = new CHMap[String, ArrayBuffer[Array[Double]]]()
   var size = 0
-  var binWidths = Array.empty[Int]
+  //var binWidths = Array.empty[Int]
   var maxHop = 0
   var maxDeg = G.degreeOf( G.vertexSet.maxBy{ x => G.degreeOf(x) } ) + 1
   val avgDeg = G.vertexSet.toList.map{ x => G.degreeOf(x) }.sum.toFloat / G.vertexSet.size
@@ -48,10 +48,10 @@ class SignatureMap( val name: String, val G: WeightedPseudograph[SimpleVertex, S
     // Compute the histograms
     var (miSigSum, maSigSum) = (Double.MaxValue,-Double.MaxValue)
 
-    binWidths = (1 to khop).map{ h =>  h*max(numBins, 2*avgDeg.toInt) }.toArray //max(40, (pow(histBase,h) * 0.1).toInt) }.toArray// }max(100, pow(histBase,h).toInt) }.toArray
-    val ncols = binWidths.sum
+    //binWidths = (1 to khop).map{ h =>  h*max(numBins, 2*avgDeg.toInt) }.toArray //max(40, (pow(histBase,h) * 0.1).toInt) }.toArray// }max(100, pow(histBase,h).toInt) }.toArray
+    //val ncols = binWidths.sum
     val nrows = sigs.size
-    val dat = Array.ofDim[Double](nrows, ncols)
+    //val dat = Array.ofDim[Double](nrows, ncols)
     sigs.zipWithIndex.foreach{
       si =>
       val (s,i) = si

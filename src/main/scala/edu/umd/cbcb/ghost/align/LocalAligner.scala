@@ -1,6 +1,8 @@
 package edu.umd.cbcb.ghost.align
 
-import akka.actor.ActorSystem
+import akka.event.Logging
+import akka.actor.{ Actor, ActorSystem, DeadLetter, Props }
+import akka.pattern.ask
 import com.typesafe.config.ConfigFactory
 
 import scopt._
@@ -56,7 +58,7 @@ object LocalAligner{
    */
   class Config {
     var numActors = 2
-    var numBins = 20
+    //var numBins = 20
     var localSearchIter = Option.empty[Int]//5
     var constrainedRatio = Option.empty[Double]//1.0
     var alpha = Option.empty[Double]
@@ -110,6 +112,63 @@ object LocalAligner{
       }
       ss
   } 
+
+
+  class FileWriterActor(val distFileName:String) extends Actor {
+    val distFile = new JPrintWriter(
+                   new JBufferedWriter(
+                   new JFileWriter(distFileName)))
+    val log = Logging(context.system, this)
+
+    def receive = {
+      case (n1, n2, d) => distFile.print(s"${n1}\t${n2}\t${d}\n")
+      case _ => log.info("received unknown message")
+    }
+
+    override def postStop() {
+      distFile.close()
+    }
+
+  }
+
+
+  def dumpSignatureDistancesToFile(
+    lSigMap: SignatureMap,
+    rSigMap: SignatureMap,
+    distFileName: String
+    ) = {
+
+
+
+    val system = ActorSystem("FileWriterSystem")
+    val fwActor = system.actorOf(Props(new FileWriterActor(distFileName)), name = "filewriter")
+
+    val pb = new ProgressBar( lSigMap.size, "=" )
+    var i = 0
+    (0 until lSigMap.size).par.foreach {
+      lind: Int =>
+      val lname = lSigMap.idToName(lind)
+      val lspec = lSigMap.spectra(lname)
+
+      (0 until rSigMap.size).par.foreach {
+        rind: Int =>
+        val rname = rSigMap.idToName(rind)
+        var rdeg = rSigMap.G.degreeOf( rSigMap.nameVertexMap(rname) )
+        var rspec = rSigMap.spectra(rname)
+
+        val structDist = UtilFunctions.structDistance(lspec, rspec)
+        fwActor ! ((lname, rname, structDist))
+      }
+      pb.update(i); i += 1
+    }
+    pb.update(lSigMap.size)
+    pb.done
+
+    system.shutdown
+    println(s"Wrote distances to $distFileName; exiting.\n")
+
+  }
+
 
   def computeDistances(
     lSigMap: SignatureMap,
@@ -321,8 +380,8 @@ object LocalAligner{
     val parser = new OptionParser("ComputeSubgraphSignatures") {
       intOpt("p", "numProcessors", "number of actors to use in parallel",
 	     { v: Int => config.numActors = v})
-      intOpt("n", "numBins", "number of histogram bins to use",
-             { v: Int => config.numBins = v })
+      //intOpt("n", "numBins", "number of histogram bins to use",
+      //       { v: Int => config.numBins = v })
       intOpt("l", "localSearch", "number of local search iterations to perform",
              { v: Int => config.localSearchIter = Some(v) })
       doubleOpt("a", "alpha", "alpha parameter (trade-off between sequence & topology)",
@@ -342,7 +401,7 @@ object LocalAligner{
 	{ v: String => config.g1SigFile = v.trim})
       opt("t", "s2", "second input signature file",
 	{ v: String => config.g2SigFile = v.trim})
-      opt("b", "blast", "Pairwise BLAST Scores",
+      opt("x", "blast", "Pairwise BLAST Scores",
 	{ v: String => config.blastFile = v.trim})
       opt("o", "output", "output signature file",
 	{ v: String => config.outputDir = v.trim})
@@ -385,9 +444,9 @@ object LocalAligner{
       val g2SigFile = getOrDie("sigs2", "configuration must have key \"sigs2\"")
 
       /* Optional configuration variables */
-      val numBinsStr = mainCfg.options.get("numbins").getOrElse("15"); val numBins = numBinsStr.toInt
+      //val numBinsStr = mainCfg.options.get("numbins").getOrElse("15"); val numBins = numBinsStr.toInt
       val blastFileOpt = mainCfg.options.get("sequencescores")
-      val matchType = mainCfg.options.get("matcher").getOrElse("linear").trim()
+      val matchType = "linear" //mainCfg.options.get("matcher").getOrElse("linear").trim()
       val beta = config.beta.getOrElse(mainCfg.options.get("beta").getOrElse("Infinity").toDouble)
       val constrainedRatio = config.constrainedRatio.getOrElse(mainCfg.options.get("ratio").getOrElse("1.0").toDouble)
       val localSearchIter = config.localSearchIter.getOrElse(mainCfg.options.get("searchiter").getOrElse("10").toInt)
@@ -422,7 +481,7 @@ object LocalAligner{
       val avgDeg = 0.5 * ( avgDeg1 + avgDeg2 )
       
 
-      val (sigMap1, sigMap2) = (new SignatureMap( g1SigFile, g1, numBins ), new SignatureMap( g2SigFile, g2, numBins ));
+      val (sigMap1, sigMap2) = (new SignatureMap( g1SigFile, g1 ), new SignatureMap( g2SigFile, g2 ));
 
       val histBase = avgDeg
       print("Loading "+g1SigFile+" and computing signatures . . . ")
@@ -523,28 +582,22 @@ object LocalAligner{
       val pbar = new ProgressBar( sigMap1.size, "#" )
       val matches = MMap.empty[String, String]//MHashSet.empty[(String, String, Double)]
       var round = 0
-      val (dmatches, cAlpha) = computeDistances(sigMap1, sigMap2, unmatchedLeft, 
-                                                unmatchedRight, blastScores, alpha, k, 
-                                                inferAlpha)
+
       // If the user requested us to dump the computed spectral
       // distances to a file, then do so and then exit.
       if (config.distanceDumpFile.isDefined) {
-        val distFileName = config.distanceDumpFile.get
-        val distFile = new JPrintWriter(
-                       new JBufferedWriter(
-                       new JFileWriter(distFileName)))
+        val distFile = config.distanceDumpFile.get
 
-        dmatches.foreach( m =>
-          distFile.print(s"${m._1}\t${m._2}\t${m._3._1}\n")
-        );
+        dumpSignatureDistancesToFile(sigMap1, sigMap2, distFile)
 
-        distFile.close()
-
-        println(s"Wrote distances to $distFileName; exiting.\n")
         system.shutdown
         System.exit(0)
       }
-
+  
+      val (dmatches, cAlpha) = computeDistances(sigMap1, sigMap2, unmatchedLeft, 
+                                                unmatchedRight, blastScores, alpha, k, 
+                                                inferAlpha)
+ 
       var (mm, pq) = getNearestNeighbors(dmatches, alpha)//computeNearestNeighbors(sigMap1, sigMap2, unmatchedLeft, unmatchedRight, blastScores, alpha, k)
 
       while ( !(pq.isEmpty) && alignment.size < n1 ) { 

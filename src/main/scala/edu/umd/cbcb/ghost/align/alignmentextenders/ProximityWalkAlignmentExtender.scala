@@ -51,7 +51,9 @@ class ProximityWalkAlignmentExtender( val seed: (String, String, Double), val ls
 
   }
 
-  def extendAlignment: collection.Set[(String,String,Double)] = { 
+  def extendAlignment: collection.Set[(String,String,Double)] = ??? 
+  /* currently unimplemented / DEPRECATED 
+  { 
     // elements of the queue are ordered by score
     val ord = Ordering[Double].on[MatchType]( m => 1.0 - m._3 )
     val pq = new PriorityQueue[MatchType]()(ord)
@@ -187,5 +189,6 @@ class ProximityWalkAlignmentExtender( val seed: (String, String, Double), val ls
     // val rmatches = matcher.performMatching
     rmatches.seq.toSet
   }
+  */
 
 }

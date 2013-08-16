@@ -56,7 +56,7 @@ class AlignmentExtender(
     pq += seed
     var couldMap = true
     val nhop = 3
-    val nbins = ls.binWidths.slice(0,nhop).sum
+    //val nbins = ls.binWidths.slice(0,nhop).sum
 
     /* Weight Vector */
     /*
