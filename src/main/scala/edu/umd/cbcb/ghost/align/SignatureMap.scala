@@ -6,7 +6,7 @@ import edu.umd.cbcb.ghost.mathutils.UtilFunctions
 
 import scala.collection.JavaConversions._
 import scala.collection.parallel.mutable.ParArray
-import scala.collection.mutable.{ ArrayBuffer, HashMap => MHashMap, HashSet => MHashSet }
+import scala.collection.mutable.{ ArrayBuffer, OpenHashMap => MHashMap, HashSet => MHashSet }
 import scala.math._
 import java.util.concurrent.{ ConcurrentHashMap => CHMap }
 
@@ -96,6 +96,25 @@ class SignatureMap(val name: String, val G: WeightedPseudograph[SimpleVertex, Se
     val cvertex = nameVertexMap(name)
     val cvertexMap = neighborhoods(cvertex)
     var vset = Set( cvertex )
+    
+    // If we already have the appropriate neighborhood 
+    // pre-computed, then use it
+    if ( !cvertexMap.containsKey(level) ) {
+      // Otherwise compute it
+       val cfi = new ClosestFirstIterator(G, cvertex, level)
+       neighborhoods( cvertex ) = new CHMap[Int, collection.Set[SimpleVertex]]()
+
+       while (cfi.hasNext) {
+         val targetVertex = cfi.next
+         val dist = cfi.getShortestPathLength(targetVertex).toInt
+         if (cvertexMap.containsKey(dist)) {
+          cvertexMap(dist) += targetVertex
+         } else {
+          cvertexMap(dist) = MHashSet(targetVertex)
+         }
+       }
+    }
+      
     (1 to level).foreach{ l => vset |= cvertexMap(l) }
     vset
   }

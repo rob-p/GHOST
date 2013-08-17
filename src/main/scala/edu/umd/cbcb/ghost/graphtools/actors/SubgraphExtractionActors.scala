@@ -1,6 +1,6 @@
 package edu.umd.cbcb.ghost.graphtools.actors
 
-import scala.collection.mutable.{ HashSet => MHashSet, HashMap => MHashMap, MultiMap }
+import scala.collection.mutable.{ HashSet => MHashSet, OpenHashMap => MHashMap, MultiMap }
 import scala.collection.immutable.{ TreeMap }
 import scala.collection.JavaConversions._
 import scala.collection.parallel.mutable.ParArray
