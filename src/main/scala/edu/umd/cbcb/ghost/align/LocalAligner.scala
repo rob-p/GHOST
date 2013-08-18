@@ -411,7 +411,7 @@ object LocalAligner{
     }
 
     if (parser.parse(args)) {
-
+      try {
       // Resolve issue with Java7 and Scala 2.9.1 (SI-4960)
       val version = System.getProperty("java.runtime.version")
       if ( version.slice(0,3) == "1.7" ) { 
@@ -703,7 +703,19 @@ object LocalAligner{
       }
       // Shutdown the actor system cleanly
       system.shutdown
+      } catch {
+        
+        case e: Exception => {
+          println(e)
+          println(parser.usage)
+          System.exit(1)
+        }
+
+      }
+    } else {
+      println(parser.usage)
     }
+
     System.exit(0)
   }
 
