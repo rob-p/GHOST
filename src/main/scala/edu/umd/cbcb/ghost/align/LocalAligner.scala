@@ -138,8 +138,6 @@ object LocalAligner{
     distFileName: String
     ) = {
 
-
-
     val system = ActorSystem("FileWriterSystem")
     val fwActor = system.actorOf(Props(new FileWriterActor(distFileName)), name = "filewriter")
 
@@ -155,7 +153,6 @@ object LocalAligner{
         val rname = rSigMap.idToName(rind)
         var rdeg = rSigMap.G.degreeOf( rSigMap.nameVertexMap(rname) )
         var rspec = rSigMap.spectra(rname)
-
         val structDist = UtilFunctions.structDistance(lspec, rspec)
         fwActor ! ((lname, rname, structDist))
       }
@@ -201,7 +198,6 @@ object LocalAligner{
 
         val structDist = UtilFunctions.structDistance( lspec, rspec )
         var dist = (structDist, seqDist((lname,rname)))
-
 	(lname, rname, dist)
       }
 
@@ -525,9 +521,9 @@ object LocalAligner{
           }
         }
         */
-        //smap.foreach{ case (k,v) => smap(k) = v / maxScore } 
-        smap.foreach{ case (k,v) => smap(k) = v / maxSeqScore }
-	blastScores = Some( ScoreMap(Some(smap.par), if(beta == Double.PositiveInfinity){ 1.0 } else { 1.1 } ) )
+        smap.foreach{ case (k,v) => smap(k) = v / maxScore } 
+        //smap.foreach{ case (k,v) => smap(k) = v / maxSeqScore }
+       	blastScores = Some( ScoreMap(Some(smap.par), if(beta == Double.PositiveInfinity){ 1.0 } else { 1.1 } ) )
       } else {
 	println( "Not using sequence information" )
       }
@@ -597,7 +593,6 @@ object LocalAligner{
       val (dmatches, cAlpha) = computeDistances(sigMap1, sigMap2, unmatchedLeft, 
                                                 unmatchedRight, blastScores, alpha, k, 
                                                 inferAlpha)
- 
       var (mm, pq) = getNearestNeighbors(dmatches, alpha)//computeNearestNeighbors(sigMap1, sigMap2, unmatchedLeft, unmatchedRight, blastScores, alpha, k)
 
       while ( !(pq.isEmpty) && alignment.size < n1 ) { 
@@ -707,6 +702,7 @@ object LocalAligner{
         
         case e: Exception => {
           println(e)
+          e.printStackTrace(Console.err)
           println(parser.usage)
           System.exit(1)
         }

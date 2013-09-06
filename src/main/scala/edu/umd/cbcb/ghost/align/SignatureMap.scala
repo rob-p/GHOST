@@ -96,7 +96,6 @@ class SignatureMap(val name: String, val G: WeightedPseudograph[SimpleVertex, Se
     val cvertex = nameVertexMap(name)
     val cvertexMap = neighborhoods(cvertex)
     var vset = Set( cvertex )
-    
     // If we already have the appropriate neighborhood 
     // pre-computed, then use it
     if ( !cvertexMap.containsKey(level) ) {
@@ -114,8 +113,12 @@ class SignatureMap(val name: String, val G: WeightedPseudograph[SimpleVertex, Se
          }
        }
     }
-      
-    (1 to level).foreach{ l => vset |= cvertexMap(l) }
+     
+    (1 to level).foreach{ l => 
+      if (cvertexMap.containsKey(l)) {
+        vset |= cvertexMap(l) 
+      }
+    }
     vset
   }
 

@@ -1,5 +1,5 @@
 % ![ghost logo](ghost_logo.png)
-% GHOST: User Guide v 1.0
+% GHOST: User Guide v 0.5.0
 % Author: Rob Patro
 
 \newpage
@@ -118,7 +118,7 @@ Assume that the network for which we wish to extract the signatures is in the fi
 `Net.gexf`.  Signatures can be extracted using the following command:
 
 ~~~~
-> ./ComputeSubgraphSignatures -k 3 -p 10 -g Net.gexf -o Net.sig.gz
+> ./ExtractSignatures.sh -k 3 -p 10 -i Net.gexf -o Net.sig.gz
 ~~~~
 
 The options provided on the command line are as follows:
@@ -133,7 +133,7 @@ The options provided on the command line are as follows:
       and decompose a matrix that represents the `k`-hop neighborhood of the vertex
       for which it is computing the signature.
 
-* __-g__  The network for which the signatures are to be computed.  This network should
+* __-i__  The network for which the signatures are to be computed.  This network should
       adhere to the format described in [graph format](#graph-format).
 
 * __-o__  The file where the signatures are to be written.  The signatures are written in
@@ -150,6 +150,16 @@ invocations and to help record the sets of parameters used for different alignme
 capable of accepting many alignment parameters from a configuration file in addition to 
 from the command line directly.  The parameters for the network alignment phase of GHOST
 are described below.
+
+A particular run of the aligner might look something like the following:
+
+~~~~
+> ./AlignNetworks.sh -c net1_vs_net2.cfg -o net1_vs_net2.aln -p 10
+~~~~
+
+This aligns the networks specified in the configuration file `net1_vs_net2.cfg`, using the
+alignment parameters specified within.  It will take advantage of up to 10 concurrent threads
+of execution, and the resulting alignment will be written to `net1_vs_net2.aln`. 
 
 General Parameters {#general-parameters}
 ------------------
