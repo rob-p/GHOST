@@ -30,9 +30,7 @@ unmanagedSources in Compile ~= { srcFiles => srcFiles.filterNot{ x => x.name.con
 scalacOptions ++= Seq("-unchecked", "-deprecation", "-feature", 
                       "-language:implicitConversions", "-language:higherKinds", "-language:postfixOps")
 
-resolvers += ScalaToolsSnapshots
-
-resolvers += ScalaToolsReleases
+resolvers += "ScalaTools snapshots at Sonatype" at "https://oss.sonatype.org/content/repositories/snapshots/"
 
 resolvers += "Scala Tools Nexus Snapshots" at "http://nexus.scala-tools.org/content/repositories/snapshots/"
 
